@@ -1,6 +1,6 @@
 Script to provide a bloat report for PostgreSQL tables and/or indexes. Requires the pgstattuple contrib module - https://www.postgresql.org/docs/current/static/pgstattuple.html
 
-Note that the query to check for bloat can be extremely expensive on very large databases or those with many tables. The script first requires running --create_stat_table to create a table for storing the bloat statistics. This makes it easier for reviewing the bloat statistics or running a regular monitoring interval without having to re-run the script again.
+Note that the query to check for bloat can be extremely expensive on very large databases or those with many tables. The script first requires running --create_stats_table to create a table for storing the bloat statistics. This makes it easier for reviewing the bloat statistics or running a regular monitoring interval without having to re-run the script again.
 
 Output formats are a simple text listing, ordered by wasted space. Or a python dictionary that provides more detail and can be used by other python scripts or tools that need a more structured format.
 
