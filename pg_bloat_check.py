@@ -174,13 +174,11 @@ def get_bloat(conn, exclude_schema_list, include_schema_list, exclude_object_lis
         if args.quick:
             sql += "pgstattuple_approx(%s::regclass) "
             sql += " WHERE table_len > %s"
-            sql += " AND (dead_tuple_len + approx_free_space) > %s"
-            sql += " AND (dead_tuple_percent + approx_free_percent) > %s"
+            sql += " AND ( (dead_tuple_len + approx_free_space) > %s OR (dead_tuple_percent + approx_free_percent) > %s )"
         else:
             sql += "pgstattuple(%s::regclass) "
             sql += " WHERE table_len > %s"
-            sql += " AND (dead_tuple_len + free_space) > %s"
-            sql += " AND (dead_tuple_percent + free_percent) > %s"
+            sql += " AND ( (dead_tuple_len + free_space) > %s OR (dead_tuple_percent + free_percent) > %s )"
 
         if args.debug:
             print("sql: " + cur.mogrify(sql, [o['oid'], args.min_size, args.min_wasted_size, args.min_wasted_percentage]))
