@@ -292,7 +292,7 @@ if __name__ == "__main__":
         cur.execute(sql, [args.bloat_schema, 'bloat_stats'])
     else:
         cur.execute(sql, ['bloat_stats'])
-    table_exists = cur.fetchone()[0]
+    table_exists = cur.fetchone()
     if table_exists == None:
         print("Required statistics table does not exist. Please run --create_stats_table first before running a bloat scan.")
         sys.exit(2)
