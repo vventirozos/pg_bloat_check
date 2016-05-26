@@ -107,6 +107,7 @@ def create_bloat_table(conn):
 
 def get_bloat(conn, exclude_schema_list, include_schema_list, exclude_object_list):
     sql = ""
+    commit_counter = 0
     sql_class = """SELECT c.oid, c.relkind, c.relname, n.nspname 
                     FROM pg_catalog.pg_class c
                     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace """
@@ -152,7 +153,6 @@ def get_bloat(conn, exclude_schema_list, include_schema_list, exclude_object_lis
         approximate = False
 
     for o in object_list:
-        commit_counter = 0
         if args.debug:
             print(o)
         if exclude_object_list:
@@ -245,10 +245,9 @@ def get_bloat(conn, exclude_schema_list, include_schema_list, exclude_object_lis
                                , approximate
                              ]) 
 
-            #TODO commit_rate variable not being found. dunno why
             commit_counter += 1
-            if args.commit_rate > 0 and commit_counter >= args.commit_rate:
-                if debug:
+            if args.commit_rate > 0 and (commit_counter % args.commit_rate == 0):
+                if args.debug:
                     print("Batch committed. Current rowcount: " + str(commit_counter))
                 conn.commit()
     cur.close()
