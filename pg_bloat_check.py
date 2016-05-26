@@ -245,11 +245,11 @@ def get_bloat(conn, exclude_schema_list, include_schema_list, exclude_object_lis
                                , approximate
                              ]) 
 
-            commit_counter += 1
-            if args.commit_rate > 0 and (commit_counter % args.commit_rate == 0):
-                if args.debug:
-                    print("Batch committed. Current rowcount: " + str(commit_counter))
-                conn.commit()
+        commit_counter += 1
+        if args.commit_rate > 0 and (commit_counter % args.commit_rate == 0):
+            if args.debug:
+                print("Batch committed. Object scanned count: " + str(commit_counter))
+            conn.commit()
     cur.close()
 ## end get_bloat()            
 
