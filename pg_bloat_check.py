@@ -286,6 +286,11 @@ if __name__ == "__main__":
 
     cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
 
+    if args.create_stats_table:
+        create_bloat_table(conn)
+        close_conn(conn)
+        sys.exit(1)
+
     sql = "SELECT tablename FROM pg_catalog.pg_tables WHERE tablename = %s"
     if args.bloat_schema != None:
         sql += " AND schemaname = %s"
@@ -297,11 +302,6 @@ if __name__ == "__main__":
         print("Required statistics table does not exist. Please run --create_stats_table first before running a bloat scan.")
         sys.exit(2)
         
-    if args.create_stats_table:
-        create_bloat_table(conn)
-        close_conn(conn)
-        sys.exit(1)
-
     if args.exclude_schema != None:
         exclude_schema_list = create_list('csv', args.exclude_schema)
     else:
