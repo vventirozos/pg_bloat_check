@@ -37,11 +37,12 @@ def check_pgstattuple(conn):
     sql = "SELECT extversion FROM pg_catalog.pg_extension WHERE extname = 'pgstattuple'"
     cur = conn.cursor()
     cur.execute(sql)
-    pgstattuple_version = cur.fetchone()[0]
+    pgstattuple_version = cur.fetchone()
     if pgstattuple_version == None:
         print("pgstattuple extension not found. Please ensure it is installed in the database this script is connecting to.")
         sys.exit(2)
-    return pgstattuple_version
+    else:
+        return pgstattuple_version[0]
 
 
 def create_conn():
@@ -272,7 +273,6 @@ if __name__ == "__main__":
         print("--schema and --exclude_schema are exclusive options and cannot be set together")
         sys.exit(2)
 
-
     conn = create_conn()
 
     pgstattuple_version = float(check_pgstattuple(conn))
@@ -284,6 +284,19 @@ if __name__ == "__main__":
             print("--quick option can only be used with --mode=tables")
             sys.exit(2)
 
+    cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+
+    sql = "SELECT tablename FROM pg_catalog.pg_tables WHERE tablename = %s"
+    if args.bloat_schema != None:
+        sql += " AND schemaname = %s"
+        cur.execute(sql, [args.bloat_schema, 'bloat_stats'])
+    else:
+        cur.execute(sql, ['bloat_stats'])
+    table_exists = cur.fetchone()[0]
+    if table_exists == None:
+        print("Required statistics table does not exist. Please run --create_stats_table first before running a bloat scan.")
+        sys.exit(2)
+        
     if args.create_stats_table:
         create_bloat_table(conn)
         close_conn(conn)
@@ -331,7 +344,6 @@ if __name__ == "__main__":
         else:
             sql += "bloat_stats"
         sql += " ORDER BY (dead_tuple_size_bytes + free_space_bytes) DESC"
-        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
         cur.execute(sql)
         result = cur.fetchall()
 
