@@ -1,8 +1,3 @@
-#   Insert results into a table within the database. Add option --norescan to query only from the stats table and skip truncating & repopulating table.
-        # Truncate the stats table before each run when --noscan is not given.
-        # Add option to set commit rate. Allows control of long running transactions
-#   pgstattuple works for both tables and indexes. pgstatindex gives more detailed info about indexes
-
 #!/usr/bin/env python
 
 # Script is maintained at https://github.com/keithf4/pg_bloat_check
@@ -11,8 +6,6 @@ import argparse, psycopg2, sys
 from psycopg2 import extras
 
 version = "2.0.0"
-
-# Bloat queries are adapted from the check_bloat query found in bucardo's check_postgres tool http://bucardo.org/wiki/Check_postgres
 
 parser = argparse.ArgumentParser(description="Provide a bloat report for PostgreSQL tables and/or indexes. This script uses the pgstattuple contrib module which must be installed first. Note that the query to check for bloat can be extremely expensive on very large databases or those with many tables. The script stores the bloat stats in a table so they can be queried again as needed without having to re-run the entire scan. The table contains a timestamp columns to show when it was obtained.")
 args_general = parser.add_argument_group(title="General options")
@@ -23,13 +16,15 @@ args_general.add_argument('-f', '--format', default="simple", choices=["simple",
 args_general.add_argument('-m', '--mode', choices=["tables", "indexes", "both"], default="both", help="""Provide bloat reports for tables, indexes or both. Note that table bloat statistics do not include index bloat in their results. Index bloat is always distinct from table bloat and reported separately. Default is "both".""")
 args_general.add_argument('-n', '--schema', help="Comma separated list of schema to include in report. All other schemas will be ignored.")
 args_general.add_argument('-N', '--exclude_schema', help="Comma separated list of schemas to exclude.")
+args_general.add_argument('--norescan', action="store_true", help="Set this option to have the script just read from the bloat statistics table without doing a scan of any tables again.")
 args_general.add_argument('-p', '--min_wasted_percentage', type=float, default=0.1, help="Minimum percentage of wasted space an object must have to be included in the report. Default and minimum value is 0.1 (DO NOT include percent sign in given value).")
-args_general.add_argument('-q', '--quick', action="store_true", help="Use the pgstattuple_approx() function instead of pgstattuple() for a quicker, but possibly less accurate bloat report. Note this only works in PostgreSQL 9.5+")
-args_general.add_argument('-r', '--commit_rate,', type=int, default=10, help="Sets how many tables are scanned before commiting inserts into the bloat table. Helps avoid long running transactions when scanning large tables. Default is 10. Set to 0 to avoid committing until all tables are scanned. NOTE: The bloat table is truncated on every run unless --noscan is set. The truncate is permanent after the first commit.")
+args_general.add_argument('-q', '--quick', action="store_true", help="Use the pgstattuple_approx() function instead of pgstattuple() for a quicker, but possibly less accurate bloat report. Only works for tables. Sets the 'approximate' column in the bloat statistics table to True. Note this only works in PostgreSQL 9.5+.")
+args_general.add_argument('--quiet', action="store_true", help="Insert the data into the bloat stastics table without providing any console output.")
+args_general.add_argument('-r', '--commit_rate', type=int, default=10, help="Sets how many tables are scanned before commiting inserts into the bloat statistics table. Helps avoid long running transactions when scanning large tables. Default is 10. Set to 0 to avoid committing until all tables are scanned. NOTE: The bloat table is truncated on every run unless --noscan is set. The truncate is permanent after the first commit.")
 args_general.add_argument('-s', '--min_size', type=int, default=1, help="Minimum size in bytes of object to scan (table or index). Default and minimum value is 1.")
 args_general.add_argument('--version', action="store_true", help="Print version of this script.")
 args_general.add_argument('-z', '--min_wasted_size', type=int, default=1, help="Minimum size of wasted space in bytes. Default and minimum is 1.")
-args_general.add_argument('--debug', action="store_true", help="Output additional debugging information.")
+args_general.add_argument('--debug', action="store_true", help="Output additional debugging information. Overrides quiet option.")
 
 args_setup = parser.add_argument_group(title="Setup")
 args_setup.add_argument('--pgstattuple_schema', help="If pgstattuple is not installed in the default search path, use this option to designate the schema where it is installed.")
@@ -39,13 +34,14 @@ args = parser.parse_args()
 
 
 def check_pgstattuple(conn):
-    sql = "SELECT count(*) FROM pg_catalog.pg_extension WHERE extname = 'pgstattuple'"
+    sql = "SELECT extversion FROM pg_catalog.pg_extension WHERE extname = 'pgstattuple'"
     cur = conn.cursor()
     cur.execute(sql)
-    exists = cur.fetchone()[0]
-    if exists < 1:
+    pgstattuple_version = cur.fetchone()[0]
+    if pgstattuple_version == None:
         print("pgstattuple extension not found. Please ensure it is installed in the database this script is connecting to.")
         sys.exit(2)
+    return pgstattuple_version
 
 
 def create_conn():
@@ -154,6 +150,7 @@ def get_bloat(conn, exclude_schema_list, include_schema_list, exclude_object_lis
         approximate = False
 
     for o in object_list:
+        commit_counter = 0
         if args.debug:
             print(o)
         if exclude_object_list:
@@ -175,13 +172,15 @@ def get_bloat(conn, exclude_schema_list, include_schema_list, exclude_object_lis
             sql += " \"" + arg.pgstattuple_schema + "\"."
         if args.quick:
             sql += "pgstattuple_approx(%s::regclass) "
+            sql += " WHERE table_len > %s"
+            sql += " AND (dead_tuple_len + approx_free_space) > %s"
+            sql += " AND (dead_tuple_percent + approx_free_percent) > %s"
         else:
             sql += "pgstattuple(%s::regclass) "
+            sql += " WHERE table_len > %s"
+            sql += " AND (dead_tuple_len + free_space) > %s"
+            sql += " AND (dead_tuple_percent + free_percent) > %s"
 
-        sql += " WHERE table_len > %s"
-        sql += " AND (dead_tuple_len + free_space) > %s"
-        sql += " AND dead_tuple_percent + free_percent > %s"
-        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
         if args.debug:
             print("sql: " + cur.mogrify(sql, [o['oid'], args.min_size, args.min_wasted_size, args.min_wasted_percentage]))
         cur.execute(sql, [o['oid'], args.min_size, args.min_wasted_size, args.min_wasted_percentage])
@@ -200,7 +199,7 @@ def get_bloat(conn, exclude_schema_list, include_schema_list, exclude_object_lis
                 if o['relkind'] == "r":
                     objecttype = "table"
                 else:
-                    objecttype = "materialized view"
+                    objecttype = "materialized_view"
             elif o['relkind'] == "i":
                 sql+= "bloat_indexes"
                 objecttype = "index"
@@ -246,6 +245,15 @@ def get_bloat(conn, exclude_schema_list, include_schema_list, exclude_object_lis
                                , approximate
                              ]) 
 
+            #TODO commit_rate variable not being found. dunno why
+            commit_counter += 1
+            if args.commit_rate > 0 and commit_counter >= args.commit_rate:
+                if debug:
+                    print("Batch committed. Current rowcount: " + str(commit_counter))
+                conn.commit()
+    cur.close()
+## end get_bloat()            
+
 
 def print_report(result_list):
     for r in result_list:
@@ -264,9 +272,17 @@ if __name__ == "__main__":
         print("--schema and --exclude_schema are exclusive options and cannot be set together")
         sys.exit(2)
 
+
     conn = create_conn()
 
-    check_pgstattuple(conn)
+    pgstattuple_version = float(check_pgstattuple(conn))
+    if args.quick:
+        if pgstattuple_version < 1.3:
+            print("--quick option requires PostgreSQL 9.5 or greater")
+            sys.exit(2)
+        if (args.mode == "indexes" or args.mode == "both"):
+            print("--quick option can only be used with --mode=tables")
+            sys.exit(2)
 
     if args.create_stats_table:
         create_bloat_table(conn)
@@ -289,72 +305,63 @@ if __name__ == "__main__":
     else:
         exclude_object_list = []
 
-    get_bloat(conn, tuple(exclude_schema_list), tuple(include_schema_list), exclude_object_list)
-# TODO REMOVE - taken care of in get_bloat()
-#    if args.mode == "tables":
-#        result = get_table_bloat(conn, include_schema_list, exclude_object_list)
-#    if args.mode == "indexes":
-#        result = get_index_bloat(conn, include_schema_list, exclude_object_list)
+    if args.norescan == False:
+        get_bloat(conn, tuple(exclude_schema_list), tuple(include_schema_list), exclude_object_list)
 
-    # Final commit in case --commit_rate is lower than rows inserted
+    # Final commit to ensure transaction that inserted stats data closes
     conn.commit()
-    close_conn(conn)
 
     counter = 1
     result_list = []
-##    for r in result:
-        # Min check goes in order page, wasted_page, wasted_size, wasted_percentage to exclude things properly when options are combined
-##        if args.min_pages > 1:
-##            if r['pages'] < args.min_pages:
-##                continue
-##        elif args.min_pages < 1:
-##            print("--min_pages (-a) must be >= 1")
-##            sys.exit(2)
+    if args.quiet == False or args.debug == True:
+        simple_cols = "schemaname, objectname, objecttype, (dead_tuple_percent + free_percent) AS total_waste_percent, pg_size_pretty(dead_tuple_size_bytes + free_space_bytes) AS total_wasted_size"
+        dict_cols = "schemaname, objectname, objecttype, size_bytes, live_tuple_count, live_tuple_percent, dead_tuple_count, dead_tuple_size_bytes, dead_tuple_percent, free_space_bytes, free_percent, approximate"
+        if args.format == "simple":
+            sql = "SELECT " + simple_cols + " FROM "
+        elif args.format == "dict":
+            sql = "SELECT " + dict_cols + " FROM "
+        else:
+            print("Unsupported --format given. Use either 'simple' or 'dict'.")
+        if args.bloat_schema != None:
+            sql += args.bloat_schema + "."
+        if args.mode == "tables":
+            sql += "bloat_tables"
+        elif args.mode == "indexes":
+            sql += "bloat_indexes"
+        else:
+            sql += "bloat_stats"
+        sql += " ORDER BY (dead_tuple_size_bytes + free_space_bytes) DESC"
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        cur.execute(sql)
+        result = cur.fetchall()
 
-##        if args.min_wasted_size > 1:
-##            if r['wastedbytes'] < args.min_wasted_size:
-##                continue
-##        elif args.min_wasted_size < 1:
-##            print("--min_wasted_size (-z) must be >= 1")
-##            sys.exit(2)
+        for r in result:
+            if args.format == "simple":
+                justify_space = 100 - len(str(counter) + ". " + r['schemaname'] + "." + r['objectname'] + "(" + str(r['total_waste_percent']) + "%)" + r['total_wasted_size'] + " wasted")
+                result_list.append(str(counter) + ". " + r['schemaname'] + "." + r['objectname'] + "."*justify_space + "(" + str(r['total_waste_percent']) + "%) " + r['total_wasted_size'] + " wasted")
+                counter += 1
+            elif args.format == "dict":
+                result_dict = dict([('schemaname', r['schemaname'])
+                                    , ('objectname', r['objectname'])
+                                    , ('objecttype', r['objecttype'])
+                                    , ('size_bytes', int(r['size_bytes']))
+                                    , ('live_tuple_count', int(r['live_tuple_count']))
+                                    , ('live_tuple_percent', str(r['live_tuple_percent'])+"%" )
+                                    , ('dead_tuple_count', int(r['dead_tuple_count']))
+                                    , ('dead_tuple_size_bytes', int(r['dead_tuple_size_bytes']))
+                                    , ('dead_tuple_percent', str(r['dead_tuple_percent'])+"%" ) 
+                                    , ('free_space_bytes', int(r['free_space_bytes']))
+                                    , ('free_percent', str(r['dead_tuple_percent'])+"%" ) 
+                                    , ('approximate', r['approximate'])
+                                   ])
+                result_list.append(result_dict)
+    
+        if len(result_list) >= 1:
+            print_report(result_list)
+        else:
+            print("No bloat found for given parameters")
 
-##        if float(args.min_wasted_percentage) > float(0.1):
-##            if float(r['bloat_percent']) < float(args.min_wasted_percentage):
-##                continue
-##        elif float(args.min_wasted_percentage) < float(0.1):
-##            print("--min_wasted_percentage (-p) must be >= 0.1")
-##            sys.exit(2)
-
-# TODO REMOVE. DO filtering during running of query so it actually skips getting those stats
-#        if r['schemaname'] in exclude_schema_list:
-#            continue
-#
-#        if ( len(include_schema_list) > 0 and r['schemaname'] not in include_schema_list ):
-#            continue
-#
-#        if ( len(exclude_object_list) > 0 and
-#                (r['schemaname'] + "." + r['objectname']) in exclude_object_list ):
-#            continue
-# TODO REMOVE ABOVE
-
-##        if args.format == "simple":
-##            justify_space = 100 - len(str(counter)+". "+r['schemaname']+"."+r['objectname']+"(%)"+str(r['bloat_percent'])+r['wastedsize']+" wasted")
-##            result_list.append(str(counter) + ". " + r['schemaname'] + "." + r['objectname'] + "."*justify_space + "(" + str(r['bloat_percent']) + "%) " + r['wastedsize'] + " wasted")
-##            counter += 1
-##        elif args.format == "dict":
-##            result_dict = dict([('schemaname', r['schemaname'])
-##                                , ('objectname', r['objectname'])
-##                                , ('total_pages', int(r['pages']) )
-##                                , ('bloat_percent', str(r['bloat_percent'])+"%" )
-##                                , ('wasted_size', r['wastedsize'])
-##                                , ('wasted_pages', int(r['wastedpages']))
-##                                ])
-##            result_list.append(result_dict)
-##
-##    if len(result_list) >= 1:
-##        print_report(result_list)
-##    else:
-##        print("No bloat found for given parameters")
+    close_conn(conn)
 
 """
 LICENSE AND COPYRIGHT
