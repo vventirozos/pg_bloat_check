@@ -22,6 +22,7 @@ args_general.add_argument('-q', '--quick', action="store_true", help="Use the pg
 args_general.add_argument('--quiet', action="store_true", help="Insert the data into the bloat stastics table without providing any console output.")
 args_general.add_argument('-r', '--commit_rate', type=int, default=5, help="Sets how many tables are scanned before commiting inserts into the bloat statistics table. Helps avoid long running transactions when scanning large tables. Default is 5. Set to 0 to avoid committing until all tables are scanned. NOTE: The bloat table is truncated on every run unless --noscan is set.")
 args_general.add_argument('-s', '--min_size', type=int, default=1, help="Minimum size in bytes of object to scan (table or index). Default and minimum value is 1.")
+args_general.add_argument('-t', '--tablename', help="Scan for bloat only on the given table. Must be schema qualified. This always gets both table and index bloat and overrides all other filter options so you always get the bloat statistics for the table no matter what they are.")
 args_general.add_argument('--version', action="store_true", help="Print version of this script.")
 args_general.add_argument('-z', '--min_wasted_size', type=int, default=1, help="Minimum size of wasted space in bytes. Default and minimum is 1.")
 args_general.add_argument('--debug', action="store_true", help="Output additional debugging information. Overrides quiet option.")
@@ -108,31 +109,43 @@ def create_bloat_table(conn):
 def get_bloat(conn, exclude_schema_list, include_schema_list, exclude_object_list):
     sql = ""
     commit_counter = 0
+    cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+
     sql_class = """SELECT c.oid, c.relkind, c.relname, n.nspname 
                     FROM pg_catalog.pg_class c
                     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace """
                     
-    if args.mode == "both":
-        sql_class += " WHERE relkind IN ('r', 'i', 'm') "
-    elif args.mode == "tables":
-        sql_class += " WHERE relkind IN ('r', 'm') "
-    elif args.mode == "indexes":
-        sql_class += " WHERE relkind IN ('i') "
+    if args.tablename == None:
+        if args.mode == "both":
+            sql_class += " WHERE relkind IN ('r', 'i', 'm') "
+        elif args.mode == "tables":
+            sql_class += " WHERE relkind IN ('r', 'm') "
+        elif args.mode == "indexes":
+            sql_class += " WHERE relkind IN ('i') "
 
-    cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-    # IN clauses work with python tuples. lists were converted by get_bloat() call
-    if include_schema_list:
-        sql_class += " AND n.nspname IN %s"
-        if args.debug:
-            print(cur.mogrify(sql_class, (include_schema_list,)))
-        cur.execute(sql_class, (include_schema_list,))
-    elif exclude_schema_list:
-        sql_class += " AND n.nspname NOT IN %s"
-        if args.debug:
-            print("sql_class: " + cur.mogrify(sql_class, (exclude_schema_list,) ))
-        cur.execute(sql_class, (exclude_schema_list,) )
-    else:
-        cur.execute(sql)
+        # IN clauses work with python tuples. lists were converted by get_bloat() call
+        if include_schema_list:
+            sql_class += " AND n.nspname IN %s"
+            if args.debug:
+                print(cur.mogrify(sql_class, (include_schema_list,)))
+            cur.execute(sql_class, (include_schema_list,))
+        elif exclude_schema_list:
+            sql_class += " AND n.nspname NOT IN %s"
+            if args.debug:
+                print("sql_class: " + cur.mogrify(sql_class, (exclude_schema_list,) ))
+            cur.execute(sql_class, (exclude_schema_list,) )
+        else:
+            cur.execute(sql)
+    else:  # only get bloat for specific table and its indexes
+        sql_class += """ WHERE n.nspname||'.'||c.relname = %s
+                        UNION
+                        SELECT c.oid, c.relkind, c.relname, n.nspname 
+                        FROM pg_catalog.pg_class c
+                        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace 
+                        JOIN pg_catalog.pg_index i ON c.oid = i.indexrelid
+                        WHERE i.indrelid::regclass = %s::regclass"""
+        cur.execute(sql_class, [args.tablename, args.tablename] )
+
 
     object_list = cur.fetchall()
 
@@ -155,11 +168,9 @@ def get_bloat(conn, exclude_schema_list, include_schema_list, exclude_object_lis
     for o in object_list:
         if args.debug:
             print(o)
-        if exclude_object_list:
+        if exclude_object_list and args.tablename == None:
             match_found = False
             for e in exclude_object_list:
-                print("list object: " + e)
-                print("class object: " + o['nspname'] + "." + o['relname'])
                 if e == o['nspname'] + "." + o['relname']:
                     match_found = True
             if match_found:
@@ -174,16 +185,24 @@ def get_bloat(conn, exclude_schema_list, include_schema_list, exclude_object_lis
             sql += " \"" + arg.pgstattuple_schema + "\"."
         if args.quick:
             sql += "pgstattuple_approx(%s::regclass) "
-            sql += " WHERE table_len > %s"
-            sql += " AND ( (dead_tuple_len + approx_free_space) > %s OR (dead_tuple_percent + approx_free_percent) > %s )"
+            if args.tablename == None:
+                sql += " WHERE table_len > %s"
+                sql += " AND ( (dead_tuple_len + approx_free_space) > %s OR (dead_tuple_percent + approx_free_percent) > %s )"
         else:
             sql += "pgstattuple(%s::regclass) "
-            sql += " WHERE table_len > %s"
-            sql += " AND ( (dead_tuple_len + free_space) > %s OR (dead_tuple_percent + free_percent) > %s )"
+            if args.tablename == None:
+                sql += " WHERE table_len > %s"
+                sql += " AND ( (dead_tuple_len + free_space) > %s OR (dead_tuple_percent + free_percent) > %s )"
 
-        if args.debug:
-            print("sql: " + cur.mogrify(sql, [o['oid'], args.min_size, args.min_wasted_size, args.min_wasted_percentage]))
-        cur.execute(sql, [o['oid'], args.min_size, args.min_wasted_size, args.min_wasted_percentage])
+        if args.tablename == None:
+            if args.debug:
+                print("sql: " + cur.mogrify(sql, [o['oid'], args.min_size, args.min_wasted_size, args.min_wasted_percentage]))
+            cur.execute(sql, [o['oid'], args.min_size, args.min_wasted_size, args.min_wasted_percentage])
+        else:
+            if args.debug:
+                print("sql: " + cur.mogrify(sql, [o['oid']]))
+            cur.execute(sql, [o['oid']])
+
         stats = cur.fetchall()
 
         if args.debug:
